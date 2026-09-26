@@ -1,1 +1,100 @@
+name: Import and build Dollfind
 
+on:
+  push:
+    branches: [main]
+    paths: [Dollfind_repo_ready.zip]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and unpack the prepared project
+        run: |
+          echo '9aedc01bd034aac4370e492f80dcf7fded82bfaf6bd94e39b358aee5e4d6c088  Dollfind_repo_ready.zip' | sha256sum --check
+          unzip -tq Dollfind_repo_ready.zip
+          unzip -oq Dollfind_repo_ready.zip
+          rm Dollfind_repo_ready.zip
+          rm .github/workflows/build.yml
+      - name: Commit the source files
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Import Dollfind Flutter project'
+          git push
+
+  android:
+    needs: import
+    if: always() && (needs.import.result == 'success' || needs.import.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Unpack on the first run
+        run: |
+          if test -f Dollfind_repo_ready.zip; then unzip -oq Dollfind_repo_ready.zip; fi
+      - name: Generate the Android platform and permissions
+        run: |
+          flutter create --platforms=android --org no.mortil --project-name dollfind /tmp/scaffold
+          cp -r /tmp/scaffold/android .
+          python3 - <<'PY'
+          import re
+          path = 'android/app/src/main/AndroidManifest.xml'
+          with open(path) as f: xml = f.read()
+          perms = ('    <uses-permission android:name="android.permission.CAMERA"/>\n'
+                   '    <uses-permission android:name="android.permission.INTERNET"/>\n'
+                   '    <uses-feature android:name="android.hardware.camera" android:required="false"/>\n')
+          if 'android.permission.CAMERA' not in xml:
+              xml = re.sub(r'(<manifest[^>]*>)', r'\1\n' + perms, xml, count=1)
+          with open(path, 'w') as f: f.write(xml)
+          PY
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dollfind-android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+  ios:
+    needs: import
+    if: always() && (needs.import.result == 'success' || needs.import.result == 'skipped')
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - name: Unpack on the first run
+        run: |
+          if test -f Dollfind_repo_ready.zip; then unzip -oq Dollfind_repo_ready.zip; fi
+      - name: Generate the iOS platform and privacy strings
+        run: |
+          flutter create --platforms=ios --org no.mortil --project-name dollfind /tmp/scaffold
+          cp -r /tmp/scaffold/ios .
+          python3 - <<'PY'
+          path = 'ios/Runner/Info.plist'
+          with open(path) as f: plist = f.read()
+          extra = ('\t<key>NSCameraUsageDescription</key>\n'
+                   '\t<string>Dollfind uses the camera to photograph items in your collection.</string>\n'
+                   '\t<key>NSPhotoLibraryUsageDescription</key>\n'
+                   '\t<string>Dollfind lets you choose a photo for your collection.</string>\n')
+          if 'NSCameraUsageDescription' not in plist:
+              plist = plist.replace('</dict>\n</plist>', extra + '</dict>\n</plist>')
+          with open(path, 'w') as f: f.write(plist)
+          PY
+      - run: flutter pub get
+      - run: flutter build ios --simulator
+      - run: flutter build ios --release --no-codesign
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dollfind-ios-unsigned-app
+          path: build/ios/iphoneos/Runner.app
